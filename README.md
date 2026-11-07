@@ -1,5 +1,5 @@
 # NuinuiMods
-A mod loader for the game FLARE NUINUI QUEST
+A mod loader for the game FLARE NUINUI QUEST. Compatible with most (all?) versions of the game.
 
 ## Installation
 
