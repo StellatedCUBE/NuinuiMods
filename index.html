@@ -812,7 +812,7 @@
 					NNM.code.findReplaceAllLines('LocaleElem.constructor', 'Array.from(', 'Array.from(id.startsWith("raw:") ? id.substr(4) :');
 				}
 
-				NNM.code.insertAtStartOfScope('Game.constructor', 'self.NNM.game = this;');
+				NNM.code.insertAtStartOfScope('Game.constructor', 'self.NNM.game = self.NNM.game || this;');
 				NNM.code.insertAtEndOfScope('flare.js', 'NNM.playerBaseClass = Flare;');
 
 				if (steam) {
