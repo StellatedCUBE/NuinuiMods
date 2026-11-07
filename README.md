@@ -3,7 +3,7 @@ A mod loader for the game FLARE NUINUI QUEST
 
 ## Installation
 
-- Download the latest release from [the releases page]() for your platform. (`exe` for Windows, `x64` for Linux)
+- Download the latest release from [the releases page](https://github.com/StellatedCUBE/NuinuiMods/releases) for your platform. (`exe` for Windows, `x64` for Linux)
 - Place it in the same folder as FLARE NUINUI QUEST. (Use “Browse Game Files” on Steam to find the correct folder for that version.)
 - Run it. The first time you do so, there may be a longer launch while the game files are extracted.
 
