@@ -1,0 +1,57 @@
+{
+  "name": "nuinuimods",
+  "version": "1.0.0",
+  "description": "NuinuiMods",
+  "repository": {
+    "type": "git",
+    "url": "git@github.com-StellatedCUBE:StellatedCUBE/NuinuiMods.git"
+  },
+  "license": "MIT",
+  "author": "StellatedCUBE",
+  "type": "commonjs",
+  "main": "index.mjs",
+  "scripts": {
+  	"export": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0"
+  },
+  "dependencies": {
+    "@electron/asar": "^4.3.0",
+    "ws": "^8.22.1"
+  },
+  "build": {
+    "appId": "moe.shinten.nuinuimods",
+    "productName": "NuinuiMods",
+    "portable": {},
+    "win": {
+      "target": [
+        "portable"
+      ],
+	  "files": [
+        "node_modules/**/*",
+        "package.json",
+		"*.mjs",
+		"*.html",
+		"patch.dat"
+      ]
+    },
+	"appImage": {},
+	"linux": {
+		"icon": "build/256x256.png",
+		"target": [
+			"AppImage"
+		],
+		"files": [
+        "node_modules/**/*",
+        "package.json",
+		"*.mjs",
+		"*.html"
+		]
+	}
+  },
+  "allowScripts": {
+    "electron-winstaller@5.4.0": true
+  }
+}

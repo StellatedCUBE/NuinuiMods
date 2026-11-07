@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<style>html{background-color:#000}</style>
+		<script>(()=>{
+			let modPatchingBegun = false;
+
+			document.write('<base href="nnm://game/">');
+
+			async function get(url) {
+				const response = await fetch(url);
+				if (!response.ok) throw new RangeError(response.status);
+				return await response.text();
+			}
+
+			function indentOf(line) {
+				if (!line) return 0;
+				let i = 0;
+				while (line[i] === ' ' || line[i] === '\t') {
+					i++;
+				}
+				return i;
+			};
+
+			function splitScope(fullScope) {
+				if (!fullScope) {
+					return [null, null];
+				}
+
+				const p = ''+fullScope;
+
+				if (p.endsWith('.js')) {
+					return [p, null];
+				}
+
+				const i = p.lastIndexOf('/');
+
+				if (i < 0) {
+					return [null, p];
+				} else {
+					return [p.substr(0, i), p.substr(i + 1)];
+				}
+			};
+
+			self.__NNM_injectPassData = [];
+
+			self.__NNM_mmdp = 6.5;
+
+			self.__NNM_getActor = event => code => {
+				let construct, actor;
+				if (code.startsWith('new ')) {
+					construct = true;
+					code = code.substring(4, code.lastIndexOf('('));
+				}
+				actor = NNM.customActorClasses.get(code) || self[code];
+				return construct ? new actor(...event.data) : actor;
+			};
+
+			let noWarn;
+			function warn(message) {
+				if (noWarn) return;
+				for (const line of Error().stack.split('\n')) {
+					if (/\s/.test(line[0]) && !/index.html:\d+:\d+\)$/.test(line))
+						message += '\n' + line;
+				}
+				console.warn(message);
+			}
+
+			class CodeFile {
+				static consts = [];
+
+				#nonSuperstringChildren = {};
+
+				constructor(path, code) {
+					this.path = path;
+					this.lines = [];
+					this.scopes = new Set();
+					
+					const scopeIndents = {};
+					let scope = '';
+					let nextScope = '';
+					let lastIndent = 0;
+					for (const line of code.split('\n')) {
+						const trim = line.trim();
+						if (!trim || trim.startsWith('//')) continue;
+
+						const indent = indentOf(line);
+
+						if (indent > lastIndent) {
+							this.scopes.add(scope = scopeIndents[indent] = nextScope);
+						}
+
+						if (/^(class|const|function) [A-Z]/.test(line)) {
+							CodeFile.consts.push(trim.match(/ [a-zA-Z0-9_]+/)[0].substr(1));
+						}
+
+						this.lines.push({scope, code: line});
+
+						if (indent < lastIndent) {
+							scope = nextScope = scopeIndents[indent] || '';
+						}
+
+						lastIndent = indent;
+
+						if (trim.endsWith('{') || trim.endsWith('[')) {
+							let id = (scope?.endsWith('.constructor') && trim.match(/^this\.[\w.]+\s*=[^.]*[{[]/)?.[0]) || trim.match(/^([a-zA-Z_]\w*|"[^"]*"|'[^']*')/)?.[0];
+							if (id === 'get' || id === 'set' || id === 'class' || id === 'async' || id === 'function' || id === 'static' || id === 'const') {
+								const newLine = trim.substr(id.length).trimStart();
+								if (id.length === 3) {
+									const new_id = newLine.match(/^[a-zA-Z_][a-zA-Z0-9_]*/)?.[0];
+									id = 'string' === typeof new_id ? `${id} ${new_id}` : new_id;
+								} else {
+									id = newLine.match(/^[a-zA-Z_][a-zA-Z0-9_]*/)?.[0];
+								}
+								if (id === 'function') {
+									id = newLine.substr(id.length).trimStart().match(/^[a-zA-Z_][a-zA-Z0-9_]*/)?.[0];
+								}
+							} else if (id && (id[0] === '"' || id[0] === "'")) {
+								id = id.substr(1, id.length - 2);
+							}
+
+							if (id?.startsWith('this.')) {
+								nextScope = scope.replace(/[^.]*$/, id.substr(5).split('=')[0].trimEnd());
+								if (scope in this.#nonSuperstringChildren)
+									this.#nonSuperstringChildren[scope].push(nextScope);
+								else
+									this.#nonSuperstringChildren[scope] = [nextScope];
+							} else if (id && id !== 'if' && id !== 'else' && id !== 'for' && id !== 'while' && id !== 'try' && id !== 'do' && id !== 'switch' && id !== 'case' && id !== 'await' && id !== 'return' && id !== 'this') {
+								nextScope = scope ? `${scope}.${id}` : id;
+							}
+						}
+					}
+				}
+
+				hasScope(scope) {
+					return !scope || this.scopes.has(scope);
+				}
+
+				inScope(line, scope) {
+					if ('object' !== typeof line) line = this.lines[line];
+					return !scope || line.scope === scope || line.scope.startsWith(scope + '.') || this.#nonSuperstringChildren[scope]?.some(c => line.scope === c || line.scope.startsWith(c + '.'));
+				}
+
+				insertCodeAt(lineNo, code, pass) {
+					let acode = ''+code;
+					if ('function' === typeof code) {
+						const ob = acode.indexOf('{');
+						const arr = acode.indexOf('=>');
+						const s = arr < 0 ? ob : ob < 0 ? arr + 2 : Math.min(arr + 2, ob);
+						acode = acode.substr(s);
+					}
+
+					const i = lineNo < 0 ? 0 : lineNo > this.lines.length ? this.lines.length : Math.ceil(lineNo);
+					const scope = this.lines[indentOf(this.lines[i - 1]?.code) > indentOf(this.lines[i]?.code) ? i - 1 : i]?.scope || '';
+
+					if (pass && Object.keys(pass).length) {
+						const decl = `const{${Object.keys(pass).join(',')}}=__NNM_injectPassData[${self.__NNM_injectPassData.length}];`;
+						acode = acode.includes('%%SCOPE_PASS%%') ? acode.replace('%%SCOPE_PASS%%', decl) : `{\n${decl}\n${acode}\n}`;
+						self.__NNM_injectPassData.push(pass);
+					}
+
+					this.lines.splice(i, 0, ...acode.split('\n').map(code => ({scope, code, modded: modPatchingBegun})));
+				}
+
+				insertAtStartOfScope(scope, code, pass) {
+					for (let i = 0; i < this.lines.length; i++) {
+						if (this.lines[i].scope === scope || !scope) {
+							this.insertCodeAt(i, code, pass);
+							return true;
+						}
+					}
+				}
+				
+				insertAtEndOfScope(scope, code, pass) {
+					let flag = false;
+					for (let i = 0; i < this.lines.length; i++) {
+						if (this.inScope(i, scope)) {
+							flag = true;
+						} else if (flag) {
+							this.insertCodeAt(i - 1, code, pass);
+							return true;
+						}
+					}
+
+					if (flag) {
+						this.insertCodeAt(Infinity, code, pass);
+					}
+
+					return flag;
+				}
+
+				findReplaceAllLines(pattern, substitution, scope, includeModdedLines) {
+					let flag = false;
+					for (const line of this.lines) {
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines)) {
+							const old = line.code;
+							line.code = old.replace(pattern, substitution);
+							if (old !== line.code)
+								flag = true;
+						}
+					}
+					return flag;
+				}
+
+				replaceFirstLineMatching(pattern, code, scope, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+					let acode = ''+code;
+					if ('function' === typeof code) {
+						const ob = acode.indexOf('{');
+						const arr = acode.indexOf('=>');
+						const s = arr < 0 ? ob : ob < 0 ? arr + 2 : Math.min(arr + 2, ob);
+						acode = acode.substr(s);
+					}
+
+					for (const line of this.lines) {
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							line.code = acode;
+							line.modded = true;
+							return true;
+						}
+					}
+				}
+				
+				replaceAllLinesMatching(pattern, code, scope, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+					let acode = ''+code;
+					if ('function' === typeof code) {
+						const ob = acode.indexOf('{');
+						const arr = acode.indexOf('=>');
+						const s = arr < 0 ? ob : ob < 0 ? arr + 2 : Math.min(arr + 2, ob);
+						acode = acode.substr(s);
+					}
+
+					let flag = false;
+					for (const line of this.lines) {
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							line.code = acode;
+							line.modded = true;
+							flag = true
+						}
+					}
+					return flag;
+				}
+
+				insertBeforeFirstMatchingLine(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							this.insertCodeAt(i, code, pass);
+							return true;
+						}
+					}
+				}
+				
+				insertAfterFirstMatchingLine(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							this.insertCodeAt(i + 1, code, pass);
+							return true;
+						}
+					}
+				}
+
+				insertBeforeAllMatchingLines(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					let flag = false;
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							this.insertCodeAt(i++, code, pass);
+							flag = true;
+						}
+					}
+					return flag;
+				}
+				
+				insertAfterAllMatchingLines(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					let flag = false;
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							this.insertCodeAt(++i, code, pass);
+							flag = true;
+						}
+					}
+					return flag;
+				}
+
+				insertAfterFirstMatchingBlock(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					let indent = null;
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (indent === null && this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							let j = i + 1;
+							while (!includeModdedLines && this.lines[j].modded) if (++j === this.lines.length) return;
+							if (indentOf(line.code) < indentOf(this.lines[j].code)) indent = indentOf(line.code);
+						} else if ((!line.modded || includeModdedLines) && indent === indentOf(line.code)) {
+							this.insertCodeAt(i + 1, code, pass);
+							return true;
+						}
+					}
+				}
+
+				insertAfterAllMatchingBlocks(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					let indent = null, flag = false;
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (indent === null && this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							let j = i + 1;
+							while (!includeModdedLines && this.lines[j].modded) if (++j === this.lines.length) return flag;
+							if (indentOf(line.code) < indentOf(this.lines[j].code)) indent = indentOf(line.code);
+						} else if ((!line.modded || includeModdedLines) && indent === indentOf(line.code)) {
+							this.insertCodeAt(++i, code, pass);
+							indent = null;
+							flag = true;
+						}
+					}
+					return flag;
+				}
+
+				insertAtEndOfFirstMatchingBlock(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					let indent = null;
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (indent === null && this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							let j = i + 1;
+							while (!includeModdedLines && this.lines[j].modded) if (++j === this.lines.length) return;
+							if (indentOf(line.code) < indentOf(this.lines[j].code)) indent = indentOf(line.code);
+						} else if ((!line.modded || includeModdedLines) && indent === indentOf(line.code)) {
+							this.insertCodeAt(i, code, pass);
+							return true;
+						}
+					}
+				}
+
+				insertAtEndOfAllMatchingBlocks(scope, pattern, code, pass, includeModdedLines) {
+					const predicate = ('string' === typeof pattern) ? l => l.includes(pattern) : pattern instanceof RegExp ? pattern.test.bind(pattern) : pattern;
+
+					let indent = null, flag = false;
+					for (let i = 0; i < this.lines.length; i++) {
+						const line = this.lines[i];
+						if (indent === null && this.inScope(line, scope) && (!line.modded || includeModdedLines) && predicate(line.code)) {
+							let j = i + 1;
+							while (!includeModdedLines && this.lines[j].modded) if (++j === this.lines.length) return flag;
+							if (indentOf(line.code) < indentOf(this.lines[j].code)) indent = indentOf(line.code);
+						} else if ((!line.modded || includeModdedLines) && indent === indentOf(line.code)) {
+							this.insertCodeAt(i++, code, pass);
+							indent = null;
+							flag = true;
+						}
+					}
+					return flag;
+				}
+			}
+
+			let customEventData = {
+				beforeGameUpdate: [],
+				afterGameUpdate: [],
+				stageChanged: [],
+				sceneCreated: [],
+				beforeSectionChanged: [],
+				sectionChanged: [],
+			};
+			let loadCb = () => {};
+
+			self.addEventListener = function(e, cb, o) {
+				if (e === 'load') {
+					const oldCb = loadCb;
+					loadCb = () => (oldCb(), cb());
+				} else if (e in customEventData) {
+					o = o || {};
+					o.listener = cb;
+					customEventData[e].push(o);
+				} else {
+					__proto__.addEventListener.call(self, e, cb, o);
+				}
+			}
+
+			self.removeEventListener = function(e, cb) {
+				if (e in customEventData) {
+					customEventData[e] = customEventData[e].filter(l => l.listener !== cb);
+				} else {
+					__proto__.removeEventListener.call(self, e, cb);
+				}
+			}
+
+			let playerActorIndex = 0;
+
+			self.NNM = {
+				CodeFile,
+
+				version: '1.0.0',
+				gameVersion: 'unknown',
+				mods: new Map(),
+				game: null,
+
+				open: async function(url, retryIfRateLimited) {
+					const response = await fetch('//nnm/open?link=' + encodeURIComponent(url));
+					switch (response.status) {
+						case 429:
+							if (retryIfRateLimited) {
+								await new Promise(r => setTimeout(r, 3e3));
+								return await NNM.open(url, true);
+							}
+							throw new Error('NNM.open is rate-limited');
+						case 400: throw new Error('Bad URL format');
+						case 403: throw new Error('Invalid URL protocol for NNM.open; only http and https are supported.');
+					}
+				},
+
+				getPlayer: function() {
+					const actors = NNM.game.scene.actors;
+					const actor = actors[playerActorIndex];
+					if (actor instanceof self.Flare) {
+						return actor;
+					} else for (playerActorIndex = 0; playerActorIndex < actors.length; playerActorIndex++) {
+						const actor = actors[playerActorIndex];
+						if (actor instanceof self.Flare) {
+							return actor;
+						}
+					}
+
+					return null;
+				},
+
+				setMusicData: function(track, data) {
+					NNM.customMusicData[track] = data;
+				},
+
+				addEvent: function(stage, section, event) {
+					if (!event.timeline) event.timeline = [event => event.end = true];
+					if (!event.condition) event.condition = () => true;
+					if (!stage[section]) stage[section] = [];
+					stage[section].push(event);
+				},
+
+				MainMenuOption: class {
+					static custom = [];
+
+					enabled = true;
+					hidden = false;
+					position = __NNM_mmdp;
+					vanillaIndex = -1;
+
+					get id() {
+						return '' + this.key;
+					}
+
+					func(game) {
+						this.enabled && this.onSelected(game);
+					}
+				},
+
+				code: {
+					files: [],
+
+					filesMatching: pattern => pattern ? NNM.code.files.filter(f => f.path.endsWith('/' + pattern)) : NNM.code.files,
+
+					insertAtStartOfScope: function(fullScope, code, pass) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAtStartOfScope(scope, code, pass)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAtStartOfScope did nothing');
+						}
+					},
+
+					insertAtEndOfScope: function(fullScope, code, pass) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAtEndOfScope(scope, code, pass)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAtEndOfScope did nothing');
+						}
+					},
+
+					findReplaceAllLines: function(fullScope, pattern, substitution, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.findReplaceAllLines(pattern, substitution, scope, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to findReplaceAllLines did nothing');
+						}
+					},
+
+					replaceFirstLineMatching: function(fullScope, pattern, code, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.replaceFirstLineMatching(pattern, code, scope, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to replaceFirstLineMatching did nothing');
+						}
+					},
+
+					replaceAllLinesMatching: function(fullScope, pattern, code, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.replaceAllLinesMatching(pattern, code, scope, includeModdedLines)) {
+								flag = true
+							}
+						}
+						if (!flag) {
+							warn('Call to replaceAllLinesMatching did nothing');
+						}
+					},
+
+					insertBeforeFirstMatchingLine: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertBeforeFirstMatchingLine(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertBeforeFirstMatchingLine did nothing');
+						}
+					},
+					
+					insertAfterFirstMatchingLine: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAfterFirstMatchingLine(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAfterFirstMatchingLine did nothing');
+						}
+					},
+
+					insertBeforeAllMatchingLines: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertBeforeAllMatchingLines(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertBeforeAllMatchingLines did nothing');
+						}
+					},
+					
+					insertAfterAllMatchingLines: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAfterAllMatchingLines(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAfterAllMatchingLines did nothing');
+						}
+					},
+
+					insertAfterFirstMatchingBlock: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAfterFirstMatchingBlock(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAfterFirstMatchingBlock did nothing');
+						}
+					},
+
+					insertAfterAllMatchingBlocks: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAfterAllMatchingBlocks(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAfterAllMatchingBlocks did nothing');
+						}
+					},
+
+					insertAtEndOfFirstMatchingBlock: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAtEndOfFirstMatchingBlock(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAtEndOfFirstMatchingBlock did nothing');
+						}
+					},
+
+					insertAtEndOfAllMatchingBlocks: function(fullScope, pattern, code, pass, includeModdedLines) {
+						const [fPattern, scope] = splitScope(fullScope);
+						let flag = false;
+						for (const file of NNM.code.filesMatching(fPattern)) {
+							if (file.hasScope(scope) && file.insertAtEndOfAllMatchingBlocks(scope, pattern, code, pass, includeModdedLines)) {
+								flag = true;
+							}
+						}
+						if (!flag) {
+							warn('Call to insertAtEndOfAllMatchingBlocks did nothing');
+						}
+					},
+
+				},
+
+				hasBegunAssetLoad: false,
+				customAssetData: [],
+				customL10nData: {en: {}, ja: {}},
+				customMusicData: {},
+				customActorClasses: new Map,
+
+				loadMod: async function(path, type) {
+					if (!path.endsWith('/')) {
+						path += '/';
+					}
+
+					console.log(`Loading ${type} from ${path}`);
+
+					const mod = await import(path + type + '.js');
+					if (mod.NAME) {
+						const loadAssets = !NNM.mods.has(mod.NAME);
+						NNM.mods.set(mod.NAME, mod);
+						if (loadAssets && path.startsWith('//mod/') && !NNM.hasBegunAssetLoad) {
+							const assetPath = path.substr(6) + 'asset/';
+							for (const file of NNM.allModAssetFiles) {
+								if (file.startsWith(assetPath) && file.lastIndexOf('.') > file.lastIndexOf('/')) {
+									const ext = file.substr(file.lastIndexOf('.') + 1).toLowerCase();
+									let fn = file.substring(assetPath.length, file.lastIndexOf('.'));
+									let pf = '';
+									for (const gpf of ['sp_', 'ui_', 'vfx_', 'bg_']) {
+										if (fn.startsWith(gpf)) {
+											pf = gpf;
+											fn = fn.substr(pf.length);
+											break;
+										}
+									}
+									const key = `${pf}NNM_${mod.NAME}_${fn.replace(/[<>:|*?"\\\0- ]/g, '_')}`; // This comment is needed to fix syntax highlighting in Vim {"}`
+									const url = 'nnm://mod/' + file;
+
+									if (ext === 'png' || ext === 'gif' || ext === 'webp' || ext === 'jpg' || ext === 'bmp') {
+										NNM.customAssetData.push({key, url, type: 'image'});
+									} else if (ext === 'wav' || ext === 'ogg' || ext === 'flac' || ext === 'mp3') {
+										NNM.customAssetData.push({key, url, type: 'audio'});
+									} else if (ext === 'csv') {
+										let loc;
+										if (key.toLowerCase().endsWith('_en')) {
+											loc = NNM.customL10nData.en;
+										} else if (key.toLowerCase().endsWith('_ja')) {
+											loc = NNM.customL10nData.ja;
+										}
+										if (loc) {
+											const data = (await get(url)).replace(/""/g, '\\"').split('\n');
+											for (const line of data) {
+												const comma = line.indexOf(',');
+												if (comma >= 0) {
+													let value = line.substr(comma + 1).trim();
+													if (value[0] !== '"') {
+														value = `"${value}"`;
+													}
+													loc[line.substr(0, comma).trim()] = JSON.parse(value);
+												}
+											}
+										}
+									}
+								}
+							}
+						}
+					}
+				},
+
+				getLoopStartFromFileData: function(buffer) {
+					const u8v = new Uint8Array(buffer);
+					if (u8v[0] === 82 && u8v[1] === 73 && u8v[2] === 70 && u8v[3] === 70 && u8v[8] === 87 && u8v[9] === 65 && u8v[10] === 86 && u8v[11] === 69) {
+						let blockStart = 12;
+						while (blockStart < u8v.length - 8) {
+							if (u8v[blockStart] === 115 && u8v[blockStart + 1] === 109 && u8v[blockStart + 2] === 112 && u8v[blockStart + 3] === 108) {
+								if (!u8v[blockStart + 48] && !u8v[blockStart + 49] && !u8v[blockStart + 50] && !u8v[blockStart + 51]) {
+									return (u8v[blockStart + 52] | u8v[blockStart + 53] << 8 | u8v[blockStart + 54] << 16 | u8v[blockStart + 55] << 24) / (u8v[24] | u8v[25] << 8 | u8v[26] << 16);
+								}
+								return;
+							}
+
+							blockStart += 8 + (u8v[blockStart + 4] | u8v[blockStart + 5] << 8 | u8v[blockStart + 6] << 16 | u8v[blockStart + 7] << 24);
+						}
+					}
+				},
+
+				addEventListener: self.addEventListener,
+				removeEventListener: self.removeEventListener,
+			};
+
+			const STORE_NAME = 'Tauri.storage';
+			let fs = false;
+
+			self.Tauri = {
+				ctx: true,
+				closeWindow: () => fetch('//nnm/quit'),
+				getFullscreen: () => Promise.resolve(fs),
+				setFullscreen: value => fetch('//nnm/fs/' + +(fs = !!value)),
+				unlockAchievement: () => {},
+				storage: {
+					getFile: async () => {
+						const file = {};
+						for (let i = 0; i < 8; i++)
+							file['save-' + i] = await self.Tauri.storage.getItem('save-' + i);
+						return file;
+					},
+					getItem: id => new Promise(resolve => {
+						const request = self.Tauri.storage.database.transaction(STORE_NAME).objectStore(STORE_NAME).get(id);
+						request.onerror = _ => resolve(null);
+						request.onsuccess = _ => resolve(request.result);
+					}),
+					setItem: (id, value) => new Promise((done, err) => {
+						const request = self.Tauri.storage.database.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).put(value, id);
+						request.onerror = err;
+						request.onsuccess = done;
+					}),
+					removeItem: id => new Promise(done => {
+						const request = self.Tauri.storage.database.transaction(STORE_NAME, 'readwrite').objectStore(STORE_NAME).delete(id);
+						request.onsuccess = request.onerror = done;
+					})
+				}
+			};
+
+			self.__TAURI__ = {window:{appWindow:{
+				close: Tauri.closeWindow,
+				isFullscreen: Tauri.getFullscreen,
+				setFullscreen: Tauri.setFullscreen
+			}}};
+
+			self.__NNM_invoke = (e, o) => {
+				let flag = 1, event = {
+					type: e,
+					defaultPrevented: false,
+					preventDefault: function() { this.defaultPrevented = true; },
+					...o
+				};
+				Object.assign(event, o);
+				for (const l of customEventData[e]) {
+					flag &= !l.once;
+					try { l.listener(event); }
+					catch (err) { console.error(err); }
+				}
+				if (!flag) customEventData[e] = customEventData[e].filter(l => !l.once);
+				return !event.defaultPrevented;
+			}
+
+			function performBaseInjections() {
+				const steam = NNM.gameVersion.startsWith('Steam/');
+
+				NNM.code.insertBeforeFirstMatchingLine('Assets.imageList', "'sp_flare", '...NNM.customAssetData.filter(e => e.type === "image"),');
+				NNM.code.findReplaceAllLines('Assets.constructor', '[id]', '[id.key||id]');
+				if (steam || ['1.1', '1.2'].includes(NNM.gameVersion)) {
+					NNM.code.insertAtEndOfScope('Assets.constructor', 'for (const key in this.images) this.images[key].crossOrigin = "anonymous";')
+					NNM.code.findReplaceAllLines('Assets.loadImages', '[id]', '[id.key||id]');
+					NNM.code.findReplaceAllLines('Assets.loadImages', 'src:', 'src: id.url||');
+				} else {
+					NNM.code.insertAfterFirstMatchingLine('Assets.constructor', 'new Image', 'this.images[id.key||id].crossOrigin = "anonymous";');
+					NNM.code.findReplaceAllLines('Assets.constructor', 'src = ', 'src = id.url||');
+				}
+				NNM.code.insertBeforeFirstMatchingLine('Assets.loadAudio', '...', `...NNM.customAssetData.filter(e => e.type === "audio").map(e => new Promise(r => {
+					fetch(e.url).then(d => d.arrayBuffer()).then(buffer => {
+						let data = NNM.customMusicData[e.key];
+						let loopStart = data?.loopStart ?? NNM.getLoopStartFromFileData(buffer) ?? (data ? 0 : null);
+						this.audioCtx.decodeAudioData(buffer, buffer => r(${(steam?'updateProgressBar':'')}(this[loopStart || loopStart === 0 ? 'bgmData' : 'audioList'].push({buffer, loopStart: +loopStart, id: e.key}))));
+					});
+				})),`);
+				if (steam) {
+					NNM.code.insertAfterFirstMatchingLine('MusicRoomMenu.constructor', 'super', 'for (const id in NNM.customMusicData) if (NNM.customMusicData[id]?.musicRoomTitle) this.musicDataList.push({id, title: NNM.customMusicData[id].musicRoomTitle});');
+					NNM.code.findReplaceAllLines('Assets.load', 'const ', 'let ');
+					NNM.code.insertAfterFirstMatchingLine('Assets.load', 'assetCount', 'assetCount += NNM.customAssetData.filter(e => e.type === "audio").length;');
+					NNM.code.insertBeforeFirstMatchingLine('Assets.loadLocales', 'Object.freeze', 'Object.assign(locales, self.NNM.customL10nData[lang]);');
+
+					NNM.code.findReplaceAllLines('LocaleElem.constructor', 'Array.from(', 'Array.from(id.startsWith("raw:") ? id.substr(4) :');
+				}
+
+				NNM.code.insertAtStartOfScope('Game.constructor', 'self.NNM.game = this;');
+				NNM.code.insertAtEndOfScope('flare.js', 'NNM.playerBaseClass = Flare;');
+
+				if (steam) {
+					NNM.code.findReplaceAllLines('NewGameMenuEvent.constructor.game', 'this.options[1]', 'this.options.find(o => o.id === "menu_continue")');
+					NNM.code.insertAfterFirstMatchingLine('NewGameMenuEvent.constructor', 'this.options.splice(3',
+						'this.options.forEach((o, i) => o.position = i + 1); this.options.push(...NNM.MainMenuOption.custom.filter(o => !o.hidden)); this.options.sort((a, b) => +a.position - b.position);');
+					NNM.code.insertAfterFirstMatchingLine('DataMenu.constructor', 'super', 'this.options.find(o => o.id === "menu_delete_all").func = game => game.menu = new ConfirmMenu(game, game.menu, "menu_delete_all", f);', {f: () => {
+						Tauri.setFullscreen(false);
+						Tauri.storage.database.close();
+						setInterval(() => indexedDB.deleteDatabase(self.Tauri.storage.database.name).onsuccess = _ => location.reload(), 128);
+					}});
+				} else if (['1.1', '1.2'].includes(NNM.gameVersion)) {
+					self.__NNM_mmdp = 4.5;
+					const f = (options, labels) => {
+						self.__NNM_mainMenu = (labels ? options.map(opt => opt.chars.join('')) : options).map((opt, i) => ({rawName: opt, vanillaIndex: i, position: i + 1, func: _ => {}, enabled: true}));
+						__NNM_mainMenu.push(...NNM.MainMenuOption.custom.filter(o => !o.hidden));
+						__NNM_mainMenu.sort((a, b) => +a.position - b.position);
+						const newOptions = self.__NNM_mainMenu.map(opt => opt.rawName ?? self.NNM.customL10nData.en[opt.key] ?? opt.key);
+						options.splice(0, options.length, ...(labels ? newOptions.map(name => new TextElem([...name], 'center')) : newOptions));
+					};
+					if (NNM.gameVersion === '1.2') NNM.code.insertAfterFirstMatchingLine('EVENTS.forest.0_0', 'quit game', 'f(options)', {f});
+					else NNM.code.insertBeforeFirstMatchingLine('EVENTS.forest.0_0', 'game.thanks', 'f(event.menuOptions, true)', {f});
+					NNM.code.insertBeforeFirstMatchingLine('EVENTS.forest.0_0', 'switch (event.menuCursor)', '__NNM_mainMenu[event.menuCursor].func(game);');
+					NNM.code.findReplaceAllLines('EVENTS.forest.0_0', 'switch (event.menuCursor)', 'switch (__NNM_mainMenu[event.menuCursor].vanillaIndex)');
+					NNM.code.findReplaceAllLines('EVENTS.forest.0_0', '(event.menuCursor === 1 && !event.continueOpt)', '((event.menuCursor === 1 && !event.continueOpt) || !__NNM_mainMenu[event.menuCursor].enabled)');
+					if (NNM.gameVersion === '1.1') {
+						NNM.code.findReplaceAllLines('EVENTS.forest.0_0', 'menuCursor > 3', 'menuCursor >= event.menuOptions.length');
+						NNM.code.findReplaceAllLines('EVENTS.forest.0_0', 'menuCursor = 3', 'menuCursor = event.menuOptions.length - 1');
+					}
+				} else {
+					NNM.MainMenuOption.custom = null;
+				}
+
+				NNM.code.findReplaceAllLines('Scene.updateSection', 'eval', '__NNM_getActor(event)');
+
+				noWarn = true;
+				NNM.code.insertBeforeFirstMatchingLine('Game.loop', 'this.update', 'if (__NNM_invoke("beforeGameUpdate", {target: this}))');
+				NNM.code.insertAfterFirstMatchingLine('Game.loop', 'this.accumulator -=', '__NNM_invoke("afterGameUpdate", {target: this});');
+				NNM.code.insertAfterFirstMatchingLine('Game.loop', 'this.loops++', '__NNM_invoke("afterGameUpdate", {target: this});');
+				if (!steam) NNM.code.findReplaceAllLines('Game.run', /this.update\b/, '(()=>{__NNM_invoke("beforeGameUpdate", {target: this})&&this.update();__NNM_invoke("afterGameUpdate", {target: this})})');
+				noWarn = false;
+				if (steam || ['1.1', '1.2'].includes(NNM.gameVersion)) {
+					NNM.code.insertAtEndOfScope('Game.setStage', '__NNM_invoke("stageChanged", {target: this, stage: stageId});');
+				} else {
+					NNM.code.insertAfterFirstMatchingLine('StageSelect.update', 'game.scene = ', '__NNM_invoke("stageChanged", {target: game, stage: this.selectedStage});');
+				}
+				NNM.code.insertAtEndOfScope('Scene.constructor', '__NNM_invoke("sceneCreated", {target: this}); this.currentSection && __NNM_invoke("sectionChanged", {target: this, oldSection: null, newSection: this.currentSection});');
+				NNM.code.insertBeforeFirstMatchingLine('Scene.updateSection', 'if (newSection)', 'if (__NNM_invoke("beforeSectionChanged", {target: this, oldSection: this.currentSection, newSection}))');
+				addEventListener("beforeSectionChanged", event => self.__NNM_oldSection = event.oldSection);
+				NNM.code.insertAtEndOfFirstMatchingBlock('Scene.updateSection', 'if (newSection)', '__NNM_invoke("sectionChanged", {target: this, oldSection: self.__NNM_oldSection, newSection});');
+			}
+
+			async function loadScript(path) {
+				NNM.code.files.push(new CodeFile(path, await get(path)));
+			}
+
+			!async function() {
+				const index = await get('index.html');
+
+				let ss = '', body = '', inSs, inBody;
+
+				for (let line of index.split('\n')) {
+					line = line.trim();
+					
+					if (line === '<style>') {
+						inSs = true;
+						continue;
+					}
+
+					if (line === '</style>') {
+						inSs = false;
+						continue;
+					}
+
+					if (inSs) {
+						ss += line + '\n';
+						continue;
+					}
+
+					if (line.startsWith('<body')) {
+						inBody = true;
+						continue;
+					}
+
+					if (line === '</body>') {
+						inBody = false;
+						continue;
+					}
+
+					if (line.startsWith('<script src=')) {
+						const path = line.split('"')[1];
+						if (!path.endsWith('lib/tauri.js'))
+							await loadScript(path);
+						continue;
+					}
+
+					if (/rel=['"]?stylesheet/i.test(line)) {
+						const segments = line.split('"');
+						const path = segments[1 + segments.indexOf(segments.find(segment => /href=/i.test(segment)))];
+						ss += await get(path);
+						continue;
+					}
+
+					if (inBody) {
+						body += line + '\n';
+					}
+				}
+
+				if (body) document.body.innerHTML = body;
+
+				if (NNM.code.filesMatching('steam.js').length)
+					NNM.gameVersion = 'Steam/1.3.1';
+
+				else if ((await fetch('img/ui_version.png')).ok)
+					NNM.gameVersion = '1.2';
+
+				else if ((await fetch('img/sp_shion.png')).ok)
+					NNM.gameVersion = '1.1';
+
+				else if ((await fetch('img/ui_title.png')).ok)
+					NNM.gameVersion = '1.0';
+				
+				const defaultConfig = {
+					bgmVolume: .3,
+					seVolume: .3,
+					fullscreen: false,
+					lang: 'en',
+					screenShake: true
+				};
+
+				await Promise.all([
+					new Promise(done => {
+						const dbrequest = indexedDB.open('NuinuiMods/' + NNM.gameVersion.split('/')[0], 1);
+						dbrequest.onsuccess = event => done(self.Tauri.storage.database = event.target.result);
+						dbrequest.onupgradeneeded = event => {
+							dbrequest.onsuccess = _ => {};
+							const db = self.Tauri.storage.database = event.target.result;
+							const store = db.createObjectStore(STORE_NAME);
+
+							store.transaction.oncomplete = _ => {
+								const transaction = db.transaction(STORE_NAME, 'readwrite');
+								transaction.objectStore(STORE_NAME).add(defaultConfig, 'config');
+								transaction.oncomplete = done;
+							};
+						};
+					}),
+					fetch('//nnm/assetwalk').then(r => r.json()).then(j => NNM.allModAssetFiles = j)
+				]);
+
+				const config = (await self.Tauri.storage.getItem('config')) || {};
+				if (!config.lang) {
+					Object.assign(defaultConfig, config);
+					await self.Tauri.storage.setItem('config', defaultConfig);
+				}
+
+				performBaseInjections();
+				modPatchingBegun = true;
+				
+				const modDirList = JSON.parse(await get('//mod/'));
+
+				for (const mod of modDirList) {
+					let exists;
+					try {
+						await get(`//mod/${mod}/patch.js`);
+						exists = true;
+					} catch {}
+					if (exists) await NNM.loadMod('//mod/' + mod, 'patch');
+				}
+
+				self.__NNM_loadCb = async function() {
+					self.__NNM_loadCb = null;
+
+					for (const mod of modDirList) {
+						let exists;
+						try {
+							await get(`//mod/${mod}/mod.js`);
+							exists = true;
+						} catch {}
+						if (exists) await NNM.loadMod('//mod/' + mod, 'mod');
+					}
+					
+					loadCb();
+				};
+
+				const style = document.querySelector('STYLE');
+				style.innerHTML = ss;
+
+				const code = [...NNM.code.files.map(f => f.lines.map(l => l.code).join('\n')), ...CodeFile.consts.map(c => `self.${c} = ${c};`), 'window.onload&&window.onload();__NNM_loadCb();'].join('\n');
+				for (const key in NNM.code)
+					if (!key.startsWith('files'))
+						NNM.code[key] = null;
+				NNM.setMusicLoopStart = null;
+				self.__NNM_patchedCode = code;
+				const codeBlob = new Blob([code], {type: 'application/javascript;charset=utf8'});
+				const script = document.createElement('SCRIPT');
+				script.src = URL.createObjectURL(codeBlob);
+				document.head.appendChild(script);
+			}();
+		})()</script>
+	</head>
+</html>
